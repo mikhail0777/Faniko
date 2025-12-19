@@ -1,0 +1,4 @@
+1.on home page, change the go to dashboard to view creators, and change what the box says for "go to dashboard" dashboard isn't really clear what it is, maybe say got to explore page. and second button "view your public profile" i dont really know what that means, we should probably change that to view account or something
+
+2. explore page should have a big search bar to find creator
+

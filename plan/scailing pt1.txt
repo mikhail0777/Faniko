@@ -1,0 +1,12 @@
+
+2.also have an inbox page for messaging creators
+
+3.have creator bio
+
+4.have creator profile picture
+
+5. hide become a creator a little more then it is now
+
+6.make a user page that has: your payment cards, become a creator, my profile,like the account button we have but more subsections and all that typa stuff 
+
+7.in creator dashboard under "your posts" should have the picture or video in the box so the creator can see the post so they know which one to edit or if they want to delete so they dont delete the wrong one, they should see the post kind of like an insta feed but also keep the features now of edit, delete and seeing likes and all that
