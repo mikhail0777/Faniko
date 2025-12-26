@@ -18,7 +18,7 @@ interface AuthContextValue {
   upgradeToCreator: (updates?: Partial<AuthUser>) => void;
 }
 
-const STORAGE_KEY = "faniko:user";
+const STORAGE_KEY = "fanikoUser";
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
