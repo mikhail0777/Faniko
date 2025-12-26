@@ -1,4 +1,3 @@
-// src/pages/CreatorProfile.tsx
 import React, { useEffect, useState, FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useAuth } from "../AuthContext";
@@ -29,6 +28,11 @@ type CreatorPost = {
   // backend like data
   likes?: number;
   likedBy?: string[];
+  /**
+   * Indicates whether this post is currently locked for the viewing fan.
+   * This flag is returned from the backend based on subscription and PPV unlock status.
+   */
+  locked?: boolean;
 };
 
 // Frontend-friendly view of earnings; we’ll map backend → this
@@ -82,18 +86,33 @@ export default function CreatorProfile() {
     Record<number, { liked: boolean; count: number }>
   >({});
 
-  // PPV unlock state (per post, per session)
+  // PPV unlock state (per post). This local state overrides the server-provided `locked` flag
+  // after a post has been unlocked in the current session.
   const [unlocked, setUnlocked] = useState<Record<number, boolean>>({});
   const [unlockingPostId, setUnlockingPostId] = useState<number | null>(null);
   const [unlockError, setUnlockError] = useState<string | null>(null);
 
-  // Subscription state (per session)
+  // Subscription state
   const [subscribed, setSubscribed] = useState(false);
   const [subscribing, setSubscribing] = useState(false);
   const [subscribeError, setSubscribeError] = useState<string | null>(null);
 
   // Owner view toggle: controls ONLY blur/lock (creator vs fan preview)
   const [viewerMode, setViewerMode] = useState<"creator" | "fan">("creator");
+
+  // Restore subscription UI state from localStorage when the username changes.
+  useEffect(() => {
+    if (!username) return;
+    try {
+      const key = `faniko:subscribed:${username}`;
+      const saved = localStorage.getItem(key);
+      if (saved === "true") {
+        setSubscribed(true);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [username]);
 
   useEffect(() => {
     if (!username) return;
@@ -117,16 +136,33 @@ export default function CreatorProfile() {
         setCreator(creatorData);
 
         // 2) Load posts
-        const postsRes = await fetch(
-          `http://localhost:4000/api/creators/${encodeURIComponent(
-            username
-          )}/posts`
-        );
+        let postsUrl = `http://localhost:4000/api/creators/${encodeURIComponent(
+          username
+        )}/posts`;
+        const fetchOptions: any = {};
+        // If we have a JWT token, send it to authenticate the viewer
+        if (user && (user as any).token) {
+          fetchOptions.headers = {
+            Authorization: `Bearer ${(user as any).token}`,
+          };
+        } else if (user && user.username) {
+          // Fallback: send fanUsername as a query param if no token
+          postsUrl += `?fanUsername=${encodeURIComponent(user.username)}`;
+        }
+        const postsRes = await fetch(postsUrl, fetchOptions);
         if (!postsRes.ok) {
           throw new Error("Failed to load posts");
         }
         const postsData: CreatorPost[] = await postsRes.json();
         setPosts(postsData);
+        // Initialize unlocked state based on server-provided locked flag
+        const initialUnlocked: Record<number, boolean> = {};
+        postsData.forEach((p: any) => {
+          if (p.locked === false) {
+            initialUnlocked[p.id] = true;
+          }
+        });
+        setUnlocked(initialUnlocked);
       } catch (err: any) {
         console.error(err);
         setError(err.message || "Something went wrong");
@@ -136,7 +172,7 @@ export default function CreatorProfile() {
     }
 
     loadData();
-  }, [username]);
+  }, [username, user]);
 
   // Are we viewing our own creator profile?
   const isOwner =
@@ -195,27 +231,21 @@ export default function CreatorProfile() {
   // When posts or user change, initialise like state (for heart color + count)
   useEffect(() => {
     if (!posts.length) return;
-
     const initial: Record<number, { liked: boolean; count: number }> = {};
-
     posts.forEach((p) => {
       const raw = p as any;
-      const likesCount =
-        typeof raw.likes === "number" ? Number(raw.likes) : 0;
+      const likesCount = typeof raw.likes === "number" ? Number(raw.likes) : 0;
       const likedBy: string[] | undefined = raw.likedBy;
-
       let liked = false;
       if (user && Array.isArray(likedBy)) {
         const me = user.username.toLowerCase();
         liked = likedBy.some((name) => String(name).toLowerCase() === me);
       }
-
       initial[p.id] = {
         liked,
         count: likesCount,
       };
     });
-
     setLikes(initial);
   }, [posts, user]);
 
@@ -226,29 +256,29 @@ export default function CreatorProfile() {
       alert("You need to be logged in to like posts.");
       return;
     }
-
     try {
+      const likeHeaders: any = { "Content-Type": "application/json" };
+      if (user && (user as any).token) {
+        likeHeaders["Authorization"] = `Bearer ${(user as any).token}`;
+      }
       const res = await fetch(
         `http://localhost:4000/api/creators/${encodeURIComponent(
           username
         )}/posts/${postId}/like`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: likeHeaders,
           body: JSON.stringify({
             fanUsername: user.username,
           }),
         }
       );
-
       const data = await res.json();
-
       if (!res.ok) {
         console.error("Like error:", data?.error);
         alert(data?.error || "Failed to like this post.");
         return;
       }
-
       // Backend returns: { success, postId, likes, likedByMe }
       setLikes((prev) => ({
         ...prev,
@@ -277,24 +307,25 @@ export default function CreatorProfile() {
   async function handleTipSubmit(e: FormEvent) {
     e.preventDefault();
     if (!username) return;
-
     const amountNum = Number(tipAmount || "0");
     if (Number.isNaN(amountNum) || amountNum <= 0) {
       alert("Please enter a valid tip amount.");
       return;
     }
-
     setTipSubmitting(true);
     setTipError(null);
-
     try {
+      const tipHeaders: any = { "Content-Type": "application/json" };
+      if (user && (user as any).token) {
+        tipHeaders["Authorization"] = `Bearer ${(user as any).token}`;
+      }
       const res = await fetch(
         `http://localhost:4000/api/creators/${encodeURIComponent(
           username
         )}/tips`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: tipHeaders,
           body: JSON.stringify({
             amount: amountNum,
             message: tipMessage.trim(),
@@ -304,20 +335,16 @@ export default function CreatorProfile() {
           }),
         }
       );
-
       const data = await res.json();
-
       if (!res.ok) {
         setTipError(data?.error || "Failed to send tip. Please try again.");
         return;
       }
-
       alert(
         `Thanks! Your $${amountNum.toFixed(
           2
         )} tip was recorded (MVP, no real charge).`
       );
-
       setTipOpen(false);
       setActiveTipPostId(null);
       setTipMessage("");
@@ -333,24 +360,20 @@ export default function CreatorProfile() {
 
   function handleFakeRequestSubmit(e: FormEvent) {
     e.preventDefault();
-
     if (!requestText.trim()) {
       alert("Please describe what you want.");
       return;
     }
-
     const budgetNum = Number(requestBudget || "0");
     if (Number.isNaN(budgetNum) || budgetNum <= 0) {
       alert("Please enter a valid budget.");
       return;
     }
-
     alert(
       `MVP: Sent custom request (Budget: $${budgetNum.toFixed(
         2
       )}). This would normally DM the creator.`
     );
-
     setRequestOpen(false);
     setRequestText("");
     setRequestBudget("25.00");
@@ -358,7 +381,6 @@ export default function CreatorProfile() {
 
   async function handleUnlockPost(postId: number) {
     if (!username) return;
-
     const post = posts.find((p) => p.id === postId);
     if (!post) {
       alert("Post not found.");
@@ -371,34 +393,32 @@ export default function CreatorProfile() {
       alert("This post is not a paid PPV post.");
       return;
     }
-
     setUnlockingPostId(postId);
     setUnlockError(null);
-
     try {
+      const unlockHeaders: any = { "Content-Type": "application/json" };
+      if (user && (user as any).token) {
+        unlockHeaders["Authorization"] = `Bearer ${(user as any).token}`;
+      }
       const res = await fetch(
         `http://localhost:4000/api/creators/${encodeURIComponent(
           username
         )}/posts/${postId}/unlock`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: unlockHeaders,
           body: JSON.stringify({
             fanUsername: user?.username ?? null,
             fanEmail: user?.email ?? null,
           }),
         }
       );
-
       const data = await res.json();
-
       if (!res.ok) {
         setUnlockError(data?.error || "Failed to unlock this post.");
         return;
       }
-
       setUnlocked((prev) => ({ ...prev, [postId]: true }));
-
       if (!data.alreadyUnlocked) {
         alert(
           `Unlocked this PPV post for $${post.price!.toFixed(
@@ -417,36 +437,41 @@ export default function CreatorProfile() {
   async function handleSubscribe() {
     if (!username || !creator) return;
     if (creator.accountType !== "subscription") return;
-
     setSubscribing(true);
     setSubscribeError(null);
-
     try {
+      const subscribeHeaders: any = { "Content-Type": "application/json" };
+      if (user && (user as any).token) {
+        subscribeHeaders["Authorization"] = `Bearer ${(user as any).token}`;
+      }
       const res = await fetch(
         `http://localhost:4000/api/creators/${encodeURIComponent(
           username
         )}/subscribe`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: subscribeHeaders,
           body: JSON.stringify({
             fanUsername: user?.username ?? null,
             fanEmail: user?.email ?? null,
           }),
         }
       );
-
       const data = await res.json();
-
       if (!res.ok) {
         setSubscribeError(
           data?.error || "Failed to start subscription. Please try again."
         );
         return;
       }
-
       setSubscribed(true);
-
+      // Persist subscription flag in localStorage for UI state
+      try {
+        const key = `faniko:subscribed:${username}`;
+        localStorage.setItem(key, "true");
+      } catch {
+        /* ignore */
+      }
       if (!data.alreadySubscribed) {
         alert(
           `Subscription started at $${creator.price?.toFixed(
@@ -472,11 +497,9 @@ export default function CreatorProfile() {
         </span>
       );
     }
-
     const url = `http://localhost:4000/uploads/${post.mediaFilename}`;
     const isImage = post.mediaMime?.startsWith("image/");
     const isVideo = post.mediaMime?.startsWith("video/");
-
     if (isLocked) {
       if (isImage) {
         return (
@@ -501,15 +524,16 @@ export default function CreatorProfile() {
       }
       return null;
     }
-
     if (isImage) {
       return (
-        <img src={url} alt={post.title} className="h-full w-full object-cover" />
+        <img
+          src={url}
+          alt={post.title}
+          className="h-full w-full object-cover"
+        />
       );
     }
-
     if (isVideo) {
-      // No-download-ish video configuration (MVP)
       return (
         <video
           className="h-full w-full object-cover"
@@ -523,7 +547,6 @@ export default function CreatorProfile() {
         </video>
       );
     }
-
     return (
       <span className="text-xs text-gray-500">
         Unsupported media type. (MVP)
@@ -540,7 +563,6 @@ export default function CreatorProfile() {
       </div>
     );
   }
-
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50">
@@ -550,7 +572,6 @@ export default function CreatorProfile() {
       </div>
     );
   }
-
   if (error || !creator) {
     return (
       <div className="min-h-screen bg-gray-50">
@@ -568,14 +589,11 @@ export default function CreatorProfile() {
       </div>
     );
   }
-
   const subscriptionLabel =
     creator.accountType === "subscription" && typeof creator.price === "number"
       ? `$${creator.price.toFixed(2)}/month`
       : "Free to follow";
-
   const earningsCurrency = earnings?.currency || "USD";
-
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -601,9 +619,7 @@ export default function CreatorProfile() {
               {creator.status && (
                 <p className="text-xs text-gray-500">
                   Status:{" "}
-                  <span className="font-medium capitalize">
-                    {creator.status}
-                  </span>
+                  <span className="font-medium capitalize">{creator.status}</span>
                 </p>
               )}
               {isOwner && (
@@ -620,11 +636,9 @@ export default function CreatorProfile() {
             </p>
             {creator.createdAt && (
               <p className="text-[11px] text-gray-400">
-                On Faniko since{" "}
-                {new Date(creator.createdAt).toLocaleDateString()}
+                On Faniko since {new Date(creator.createdAt).toLocaleDateString()}
               </p>
             )}
-
             {/* Earnings mini-snapshot – ONLY visible to the creator */}
             {isOwner && (
               <div className="mt-1 rounded-lg bg-gray-50 px-2.5 py-1.5 text-right">
@@ -640,10 +654,7 @@ export default function CreatorProfile() {
                 </p>
                 {earnings && (
                   <p className="text-[10px] text-gray-400">
-                    Subs {earningsCurrency}{" "}
-                    {earnings.sources.subscriptions.toFixed(0)} · PPV{" "}
-                    {earningsCurrency} {earnings.sources.ppv.toFixed(0)} · Tips{" "}
-                    {earningsCurrency} {earnings.sources.tips.toFixed(0)}
+                    Subs {earningsCurrency} {earnings.sources.subscriptions.toFixed(0)} · PPV {earningsCurrency} {earnings.sources.ppv.toFixed(0)} · Tips {earningsCurrency} {earnings.sources.tips.toFixed(0)}
                   </p>
                 )}
                 <p className="mt-0.5 text-[10px] text-gray-400">
@@ -654,7 +665,6 @@ export default function CreatorProfile() {
           </div>
         </div>
       </header>
-
       <main className="mx-auto max-w-4xl px-4 py-6">
         {/* Top actions */}
         <section className="mb-6 flex flex-wrap items-center justify-between gap-4">
@@ -668,7 +678,6 @@ export default function CreatorProfile() {
                 : "Subscribe, tip, or request custom content. (MVP: no real payments yet.)"}
             </p>
           </div>
-
           <div className="flex flex-wrap items-center gap-3">
             {/* View as toggle (only for owner) */}
             {isOwner && (
@@ -702,7 +711,6 @@ export default function CreatorProfile() {
                 </div>
               </div>
             )}
-
             {/* Hide follow / tip / request / subscribe if owner */}
             {!isOwner && (
               <>
@@ -712,7 +720,6 @@ export default function CreatorProfile() {
                 >
                   Follow (fake)
                 </button>
-
                 {creator.accountType === "subscription" && (
                   <button
                     type="button"
@@ -734,7 +741,6 @@ export default function CreatorProfile() {
                       : "Subscribe"}
                   </button>
                 )}
-
                 <button
                   type="button"
                   onClick={() => openTipModalForPost(null)}
@@ -753,13 +759,11 @@ export default function CreatorProfile() {
             )}
           </div>
         </section>
-
         {(subscribeError || unlockError) && (
           <p className="mb-4 text-xs text-red-600">
             {subscribeError || unlockError}
           </p>
         )}
-
         {/* Posts feed */}
         <section>
           <div className="flex items-center justify-between mb-3">
@@ -774,7 +778,6 @@ export default function CreatorProfile() {
                 : "PPV posts show a locked preview until you pay. (MVP)"}
             </p>
           </div>
-
           {posts.length === 0 ? (
             <p className="text-sm text-gray-500">
               This creator hasn&apos;t posted anything yet.
@@ -785,11 +788,10 @@ export default function CreatorProfile() {
                 const isOwnerViewingAsCreator =
                   isOwner && viewerMode === "creator";
                 const isOwnerViewingAsFan = isOwner && viewerMode === "fan";
-
                 // Lock logic:
                 // - Owner + "creator" view → never locked
                 // - Owner + "fan" view → always locked (preview)
-                // - Normal users → locked until unlocked[]
+                // - Normal users → use server-provided locked flag combined with client-side unlocked[] overrides
                 let isLocked = false;
                 if (post.visibility === "ppv") {
                   if (isOwnerViewingAsCreator) {
@@ -797,10 +799,10 @@ export default function CreatorProfile() {
                   } else if (isOwnerViewingAsFan) {
                     isLocked = true;
                   } else {
-                    isLocked = !unlocked[post.id];
+                    const lockedFlag = (post as any).locked ?? false;
+                    isLocked = lockedFlag && !unlocked[post.id];
                   }
                 }
-
                 const likeState = likes[post.id] || {
                   liked: false,
                   count:
@@ -808,9 +810,7 @@ export default function CreatorProfile() {
                       ? Number((post as any).likes)
                       : 0,
                 };
-
                 const canUnlock = !isOwner && post.visibility === "ppv";
-
                 return (
                   <article
                     key={post.id}
@@ -847,7 +847,6 @@ export default function CreatorProfile() {
                           )}
                       </div>
                     </div>
-
                     {/* Media area */}
                     <div className="relative bg-gray-100 aspect-video flex items-center justify-center overflow-hidden">
                       {isLocked && (
@@ -878,19 +877,14 @@ export default function CreatorProfile() {
                           </div>
                         </div>
                       )}
-
                       {renderMedia(post, isLocked)}
                     </div>
-
                     {/* Description */}
                     {post.description && (
                       <div className="px-4 py-3">
-                        <p className="text-sm text-gray-700">
-                          {post.description}
-                        </p>
+                        <p className="text-sm text-gray-700">{post.description}</p>
                       </div>
                     )}
-
                     {/* Likes row + actions */}
                     <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between">
                       {/* Small likes badge – visible to everyone (so creator can see count) */}
@@ -906,7 +900,6 @@ export default function CreatorProfile() {
                         <span>{likeState.count}</span>
                         <span>likes</span>
                       </div>
-
                       {/* Full like + tip actions only for fans (not owner) */}
                       {!isOwner && (
                         <div className="flex items-center gap-4">
@@ -923,7 +916,6 @@ export default function CreatorProfile() {
                             <span>{likeState.liked ? "♥" : "♡"}</span>
                             <span>Like</span>
                           </button>
-
                           <button
                             type="button"
                             onClick={() => openTipModalForPost(post.id)}
@@ -939,14 +931,11 @@ export default function CreatorProfile() {
               })}
             </div>
           )}
-
           <p className="mt-4 text-xs text-gray-500">
-            In a full build, this feed would support comments, likes backed by
-            the backend, real payments, and NSFW-toggle handling.
+            In a full build, this feed would support comments, likes backed by the backend, real payments, and NSFW-toggle handling.
           </p>
         </section>
       </main>
-
       {/* Tip modal */}
       {tipOpen && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
@@ -957,8 +946,7 @@ export default function CreatorProfile() {
                 : "Send a tip to this creator"}
             </h2>
             <p className="mt-1 text-xs text-gray-500">
-              MVP payments – this records a transaction on the backend but
-              doesn&apos;t charge a real card.
+              MVP payments – this records a transaction on the backend but doesn&apos;t charge a real card.
             </p>
             <form onSubmit={handleTipSubmit} className="mt-4 space-y-4">
               <div>
@@ -974,7 +962,6 @@ export default function CreatorProfile() {
                   onChange={(e) => setTipAmount(e.target.value)}
                 />
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700">
                   Message (optional, max 500 characters)
@@ -991,13 +978,11 @@ export default function CreatorProfile() {
                   {tipMessage.length}/500
                 </p>
               </div>
-
               {tipError && (
                 <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-md px-3 py-2">
                   {tipError}
                 </p>
               )}
-
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
@@ -1024,15 +1009,13 @@ export default function CreatorProfile() {
           </div>
         </div>
       )}
-
       {/* Custom request modal */}
       {requestOpen && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Request custom content</h2>
             <p className="mt-1 text-xs text-gray-500">
-              Describe what you want and your budget. In the full version this
-              would DM the creator.
+              Describe what you want and your budget. In the full version this would DM the creator.
             </p>
             <form onSubmit={handleFakeRequestSubmit} className="mt-4 space-y-4">
               <div>
@@ -1047,7 +1030,6 @@ export default function CreatorProfile() {
                   placeholder="Example: 2-minute shoutout video mentioning my username…"
                 />
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700">
                   Budget (USD)
@@ -1061,7 +1043,6 @@ export default function CreatorProfile() {
                   onChange={(e) => setRequestBudget(e.target.value)}
                 />
               </div>
-
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
@@ -1084,4 +1065,3 @@ export default function CreatorProfile() {
     </div>
   );
 }
-
